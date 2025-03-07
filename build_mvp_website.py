@@ -25,7 +25,9 @@ def define_website_structure(website_description):
         message_list = [system_prompt]
         
         user_prompt = f"""
-        Please write the simplest flask app that will meet the requirements of the following description:
+        Please write the simplest flask app that will meet the requirements of the following description.
+        The website should be visually appealing and easy to use.
+        DESCRIPTION:
         {website_description}
 
         Output the directory structure of the app. It should be a list of files and a description of the contents of each file.
@@ -141,8 +143,25 @@ def generate_file_content(file_description, website_description):
         system_prompt = {"role": "system", "content": "You are a helpful assistant. Generate only code without explanations, markdown, or backticks."}
         message_list = [system_prompt]
         
+        # Add special handling for app.py to ensure it binds to all interfaces
+        if file_description.file_name == "app.py":
+            user_prompt = f"""
+            Please write the file {file_description.file_name} with the following description:
+            {file_description.description}
+            
+            The website description is:
+            {website_description}
+            
+            IMPORTANT CONSTRAINTS:
+            1. Make sure the Flask app is properly configured to run on all interfaces (0.0.0.0)
+            2. Set debug=True during development
+            3. Include error handlers for common HTTP errors
+            4. Wrap route handlers in try/except blocks to prevent unhandled exceptions
+            
+            Generate only the file content without any markdown, code blocks, explanations, or backticks.
+            """
         # Add special handling for requirements.txt
-        if file_description.file_name == "requirements.txt":
+        elif file_description.file_name == "requirements.txt":
             user_prompt = f"""
             Please write the file {file_description.file_name} with the following description:
             {file_description.description}
@@ -192,7 +211,7 @@ def generate_website_in_sandbox(website_description):
             return None
         
         # Create a sandbox
-        sandbox = Sandbox()
+        sandbox = Sandbox(timeout=60*60)
         print(f"Created sandbox: {sandbox.sandbox_id}")
         
         # Generate and write each file
@@ -257,10 +276,16 @@ def run_website_in_sandbox(sandbox, port=5000, public_access=False):
             while retry_count < max_retries:
                 try:
                     sandbox.commands.run("pip install gunicorn")
+                    # Add more verbose logging for gunicorn
                     process = sandbox.commands.run(
-                        "cd /home/user && gunicorn --bind 0.0.0.0:5000 app:app", 
+                        "cd /home/user && gunicorn --bind 0.0.0.0:5000 --log-level debug app:app", 
                         background=True
                     )
+                    # Verify the server is actually running
+                    sandbox.commands.run("sleep 2")  # Give it time to start
+                    check_result = sandbox.commands.run("ps aux | grep gunicorn")
+                    if "app:app" not in check_result.stdout:
+                        raise Exception("Gunicorn server failed to start properly")
                     break
                 except Exception as e:
                     error_message = str(e)
@@ -285,10 +310,16 @@ def run_website_in_sandbox(sandbox, port=5000, public_access=False):
             retry_count = 0
             while retry_count < max_retries:
                 try:
+                    # Ensure Flask app runs with the right host and debug settings
                     process = sandbox.commands.run(
-                        "cd /home/user && python app.py", 
+                        "cd /home/user && FLASK_ENV=development python -c 'from app import app; app.run(host=\"0.0.0.0\", port=5000, debug=True)'", 
                         background=True
                     )
+                    # Check if server is running
+                    sandbox.commands.run("sleep 2")  # Give it time to start
+                    check_result = sandbox.commands.run("ps aux | grep 'python -c'")
+                    if "app.run" not in check_result.stdout:
+                        raise Exception("Flask server failed to start properly")
                     break
                 except Exception as e:
                     error_message = str(e)
@@ -313,6 +344,14 @@ def run_website_in_sandbox(sandbox, port=5000, public_access=False):
         host = sandbox.get_host(port)
         url = f"https://{host}"
         print(f"Website running at: {url}")
+        
+        # Add logging to help diagnose issues
+        print("Checking server logs...")
+        try:
+            logs = sandbox.commands.run("cd /home/user && cat app.log 2>/dev/null || echo 'No logs found'")
+            print(f"Server logs:\n{logs.stdout}")
+        except Exception as log_error:
+            print(f"Could not retrieve logs: {log_error}")
         
         return {
             "process": process,
@@ -366,3 +405,25 @@ def stop_website_server(website_info):
     if website_info and "process" in website_info:
         website_info["process"].kill()
         print("Website server stopped")
+
+# Add a new function to check logs when errors occur
+def check_sandbox_logs(sandbox):
+    """Check the logs in the sandbox to diagnose errors."""
+    try:
+        print("Checking Flask application error logs...")
+        # Try to get Flask/gunicorn logs
+        server_logs = sandbox.commands.run("cd /home/user && cat app.log 2>/dev/null || echo 'No app.log found'")
+        print(f"Server logs:\n{server_logs.stdout}")
+        
+        # Check running processes
+        processes = sandbox.commands.run("ps aux")
+        print(f"Running processes:\n{processes.stdout}")
+        
+        # Try checking standard error output
+        stderr = sandbox.commands.run("cd /home/user && cat *.err 2>/dev/null || echo 'No error files found'")
+        print(f"Standard error output:\n{stderr.stdout}")
+        
+        return True
+    except Exception as e:
+        print(f"Error checking logs: {e}")
+        return False
