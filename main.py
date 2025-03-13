@@ -52,6 +52,9 @@ def download_files_from_sandbox(sandbox, remote_dir, local_dir):
         if entry.name.startswith('.'):
             continue
 
+        if entry.name == '__pycache__':
+            continue
+
         if not file_path.startswith(remote_dir):
             continue
         
@@ -125,65 +128,119 @@ def build_website(repo_url, website_description, public_access=False):
         # Create a new branch
         branch_name = f"feature/mvp-website-{issue.number}"
         
+        # Initialize variables
+        sandbox = None
+        website_info = None
+        generate_success = False
+        run_success = False
+        
         # Generate website in sandbox
         sandbox = generate_website_in_sandbox(website_description)
-        if not sandbox:
-            return {"success": False, "message": "Failed to generate website"}
-        
-        # Run the website in sandbox
-        website_info = run_website_in_sandbox(sandbox, public_access=public_access)
-        if not website_info:
-            return {"success": False, "message": "Failed to run website"}
+        if sandbox:
+            generate_success = True
+            # Run the website in sandbox if generation was successful
+            website_info = run_website_in_sandbox(sandbox, public_access=public_access)
+            if website_info:
+                run_success = True
         
         # Clone the repository to temporary directory and create branch
         with tempfile.TemporaryDirectory() as temp_dir:
-            if not clone_repository(repo_url, temp_dir):
-                stop_website_server(website_info)
+            # Use the updated clone_repository function with fork=True (default)
+            if not clone_repository(repo_url, temp_dir, use_fork=True):
+                if website_info:
+                    stop_website_server(website_info)
                 return {"success": False, "message": "Failed to clone repository"}
                 
             if not create_branch(temp_dir, branch_name):
-                stop_website_server(website_info)
+                if website_info:
+                    stop_website_server(website_info)
                 return {"success": False, "message": "Failed to create branch"}
             
-            # Download files from sandbox to temp directory
-            download_files_from_sandbox(sandbox, '/home/user', temp_dir)
+            # Download files from sandbox to temp directory if generation was successful
+            if generate_success:
+                download_files_from_sandbox(sandbox, '/home/user', temp_dir)
             
             # Commit and push changes
             commit_message = f"Create MVP website for #{issue.number}"
             if not commit_and_push_changes(temp_dir, commit_message):
-                stop_website_server(website_info)
+                if website_info:
+                    stop_website_server(website_info)
                 return {"success": False, "message": "Failed to commit and push changes"}
 
             # Create a pull request
             pr_title = f"Fixes #{issue.number}: {issue_title}"
-            pr_body = f"""
-            # MVP Website Implementation
+            
+            # Adjust PR body based on success/failure of generation and running
+            if not generate_success:
+                pr_body = f"""
+                # MVP Website Implementation
 
-            This pull request addresses issue #{issue.number}.
+                This pull request addresses issue #{issue.number}.
 
-            ## Changes Made
-            - Created basic Flask application structure
-            - Implemented website according to the description
+                ## Status
+                Failed to generate website files based on the description.
+                An empty PR is being submitted as a placeholder.
 
-            ## Description
-            {website_description}
+                ## Description
+                {website_description}
+                """
+            elif not run_success:
+                pr_body = f"""
+                # MVP Website Implementation
 
-            ## Hosted Website
-            The website is hosted at: {website_info["url"]}
-            """
+                This pull request addresses issue #{issue.number}.
+
+                ## Changes Made
+                - Created basic Flask application structure
+                - Implemented website according to the description
+
+                ## Status
+                Warning: The generated website could not be run successfully.
+                Review the code carefully before merging.
+
+                ## Description
+                {website_description}
+                """
+            else:
+                pr_body = f"""
+                # MVP Website Implementation
+
+                This pull request addresses issue #{issue.number}.
+
+                ## Changes Made
+                - Created basic Flask application structure
+                - Implemented website according to the description
+
+                ## Description
+                {website_description}
+
+                ## Hosted Website
+                The website is hosted at: {website_info["url"]}
+                """
 
             pull_request = create_pull_request(repo, branch_name, "main", pr_title, pr_body)
             if not pull_request:
-                stop_website_server(website_info)
+                if website_info:
+                    stop_website_server(website_info)
                 return {"success": False, "message": "Failed to create pull request"}
 
-        return {
+        # Include appropriate details in the response based on what succeeded
+        response = {
             "success": True,
-            "message": "Successfully created MVP website",
+            "message": "Successfully created pull request",
             "issue_url": issue.html_url,
-            "pr_url": pull_request.html_url,
-            "website_url": website_info["url"]
+            "pr_url": pull_request.html_url
         }
+        
+        if run_success and website_info:
+            response["website_url"] = website_info["url"]
+            response["message"] = "Successfully created MVP website"
+        elif generate_success:
+            response["message"] = "Created PR with generated files, but website could not be run"
+        else:
+            response["message"] = "Created empty PR, website generation failed"
+            
+        return response
     except Exception as e:
         print(f"Error building website: {e}")
         return {"success": False, "message": f"Error: {str(e)}"}
